@@ -116,7 +116,7 @@ class FEA:
     u_free = jax.scipy.linalg.solve(
           k_free,
           self.bc.force[self.bc.free_dofs], \
-          sym_pos = True, check_finite=False)
+          assume_a = 'pos', check_finite=False)
     u = jnp.zeros((self.num_dofs))
     u = u.at[self.bc.free_dofs].add(u_free.reshape(-1))
     return u
