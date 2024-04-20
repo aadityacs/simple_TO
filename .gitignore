@@ -1,0 +1,12 @@
+*.pyc
+*.DS_Store
+*.svg
+*.pdf
+*.png
+*.jpg
+*.tiff
+*.exe
+*.pkl
+*.npy
+*.npz
+*.so

@@ -1,34 +1,27 @@
 import numpy as np
 import jax.numpy as jnp
 import jax
-from mesher import Mesher
+
 from typing import Tuple
-import dataclasses
 import matplotlib.pyplot as plt
 
-@dataclasses.dataclass
-class BC:
-  force: np.ndarray
-  fixed_dofs: np.ndarray
+import mesher
+import material
+import bcs
 
-  @property
-  def num_dofs(self):
-    return self.force.shape[0]
 
-  @property
-  def free_dofs(self):
-    return jnp.setdiff1d(np.arange(self.num_dofs),self.fixed_dofs)
-
+_BilinMesh = mesher.BilinearStructMesher
 
 
 class FEA:
-  def __init__(self, mesh: Mesher, material, bc: BC):
+  def __init__(self,
+               mesh: _BilinMesh,
+               material: material.StructuralMaterial,
+               bc: bcs.BC):
     self.mesh, self.material, self.bc = mesh, material, bc
-    self.dofs_per_elem, self.num_dofs  = 8, 2*mesh.num_nodes
     self.D0 = self.FE_compute_element_stiffness()
-    self.elem_node, self.edofMat, self.iK, self.jK = \
-        self.compute_connectivity_info()
-  #-----------------------#
+
+
   def FE_compute_element_stiffness(self) -> np.ndarray:
     E = 1.
     nu = self.material.poisson_ratio
@@ -44,37 +37,8 @@ class FEA:
     [k[6], k[3], k[4], k[1], k[2], k[7], k[0], k[5]],
     [k[7], k[2], k[1], k[4], k[3], k[6], k[5], k[0]] ]).T
     return D0
-  #-----------------------#
-  def compute_connectivity_info(self) \
-      -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """ Computes the mesh connectivity and global node numbering info.
-    """
-    elem_node = np.zeros((4, self.mesh.num_elems))
-    for elx in range(self.mesh.nelx):
-      for ely in range(self.mesh.nely):
-        el = ely+elx*self.mesh.nely
-        n1=(self.mesh.nely+1)*elx+ely
-        n2=(self.mesh.nely+1)*(elx+1)+ely
-        elem_node[:,el] = np.array([n1+1, n2+1, n2, n1])
-    elem_node = elem_node.astype(int)
 
-    edofMat = np.zeros( ( self.mesh.num_elems ,\
-        4*self.mesh.num_dim ), dtype=int )
 
-    for elem in range(self.mesh.num_elems):
-      enodes = elem_node[:,elem]
-
-      edofs = np.stack( ( 2*enodes , 2*enodes+1 ) , axis=1 )\
-              .reshape( ( 1 , self.dofs_per_elem ) )
-      edofMat[elem,:] = edofs
-    
-    matrx_size = self.mesh.num_elems*self.dofs_per_elem**2
-    iK = np.kron( edofMat , np.ones((self.dofs_per_elem,1),dtype=int) ).T\
-        .reshape( matrx_size, order ='F')
-    jK = np.kron( edofMat , np.ones((1,self.dofs_per_elem),dtype=int) ).T\
-        .reshape( matrx_size , order ='F')
-    return elem_node, edofMat, iK, jK
-  #---------------#
   def compute_elem_stiffness_matrix(self,
                                     youngs_modulus: jnp.ndarray)->jnp.ndarray:
     """
@@ -88,7 +52,8 @@ class FEA:
     """
     # e - element, i - elem_nodes j - elem_nodes
     return jnp.einsum('e, ij->ije', youngs_modulus, self.D0)
-  #-----------------------#
+
+
   def assemble_stiffness_matrix(self, elem_stiff_mtrx: jnp.ndarray):
     """
     Args:
@@ -99,11 +64,12 @@ class FEA:
     Returns: Array of size (num_dofs, num_dofs) which is the assembled global
       stiffness matrix.
     """
-    glob_stiff_mtrx = jnp.zeros((self.num_dofs, self.num_dofs))
-    glob_stiff_mtrx = glob_stiff_mtrx.at[(self.iK, self.jK)].add(
+    glob_stiff_mtrx = jnp.zeros((self.mesh.num_dofs, self.mesh.num_dofs))
+    glob_stiff_mtrx = glob_stiff_mtrx.at[(self.mesh.iK, self.mesh.jK)].add(
                                       elem_stiff_mtrx.flatten('F'))
     return glob_stiff_mtrx
-  #-----------------------#
+
+
   def solve(self, glob_stiff_mtrx):
     """Solve the system of Finite element equations.
     Args:
@@ -115,12 +81,13 @@ class FEA:
 
     u_free = jax.scipy.linalg.solve(
           k_free,
-          self.bc.force[self.bc.free_dofs], \
+          self.bc.force[self.bc.free_dofs],
           assume_a = 'pos', check_finite=False)
-    u = jnp.zeros((self.num_dofs))
+    u = jnp.zeros((self.mesh.num_dofs))
     u = u.at[self.bc.free_dofs].add(u_free.reshape(-1))
     return u
-  #-----------------------#
+
+
   def compute_compliance(self, u:jnp.ndarray)->jnp.ndarray:
     """Objective measure for structural performance.
     Args:
@@ -129,8 +96,9 @@ class FEA:
     Returns: Structural compliance, which is a measure of performance. Lower
       compliance means stiffer and stronger design.
     """
-    return jnp.dot(u, self.bc.force.flatten() )
-  #-----------------------#
+    return jnp.dot(u, self.bc.force.flatten())
+
+
   def loss_function(self, density:jnp.ndarray)->float:
     """Wrapper function that takes in density field and returns compliance.
     Args:
@@ -144,7 +112,8 @@ class FEA:
     glob_stiff_mtrx = self.assemble_stiffness_matrix(elem_stiffness_mtrx)
     u = self.solve(glob_stiff_mtrx)
     return self.compute_compliance(u)
-  #-----------------------#
+
+
   def plot_displacement(self, u, density = None):
     elemDisp = u[self.edofMat].reshape(self.mesh.nelx*self.mesh.nely, 8)
     elemU = (elemDisp[:,0] + elemDisp[:,2] + elemDisp[:,4] + elemDisp[:,6])/4
